@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>The Amazing Link's Adventures: Climbing the Mountain</title>
+<style>
+  :root { --bg:#0d1820; --fg:#f3ead2; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font-family: Georgia, 'Times New Roman', serif; overflow:hidden; touch-action:none;
+    -webkit-user-select:none; user-select:none; }
+  #wrap { position:relative; height:100%; display:flex; align-items:center; justify-content:center; }
+  canvas { display:block; height:min(100vh, 150vw); width:auto; aspect-ratio:2/3; max-width:100vw;
+    box-shadow:0 0 60px #000c; border-radius:6px; }
+  #pad { display:none; position:absolute; bottom:18px; left:16px; width:150px; height:150px; }
+  #pad button { position:absolute; width:50px; height:50px; border-radius:12px; border:2px solid #f3ead288;
+    background:#0d182088; color:var(--fg); font-size:22px; touch-action:none; }
+  #pad [data-k=up]{left:50px;top:0} #pad [data-k=down]{left:50px;top:100px}
+  #pad [data-k=left]{left:0;top:50px} #pad [data-k=right]{left:100px;top:50px}
+  @media (pointer:coarse) { #pad { display:block; } }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game"></canvas>
+  <div id="pad">
+    <button data-k="up">▲</button><button data-k="left">◀</button>
+    <button data-k="right">▶</button><button data-k="down">▼</button>
+  </div>
+</div>
+<script>
+(() => {
+const W = 480, H = 720, TH = 1440;
+const cvs = document.getElementById('game'), ctx = cvs.getContext('2d');
+const dpr = Math.min(window.devicePixelRatio || 1, 2);
+cvs.width = W * dpr; cvs.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+  let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const rand = Math.random;
+const lerp = (a, b, t) => a + (b - a) * t;
+
+// ---------- Mountain wall (pre-rendered, vertically tiling) ----------
+const wall = (() => {
+  const t = document.createElement('canvas'); t.width = W * 2; t.height = TH * 2;
+  const g = t.getContext('2d'); g.scale(2, 2);
+  const r = rng(11);
+  const grd = g.createLinearGradient(0, 0, W, 0);
+  grd.addColorStop(0, '#54443a'); grd.addColorStop(.5, '#6e5a4a'); grd.addColorStop(1, '#4e4036');
+  g.fillStyle = grd; g.fillRect(0, 0, W, TH);
+  const wrap = fn => { for (const dy of [-TH, 0, TH]) { g.save(); g.translate(0, dy); fn(); g.restore(); } };
+  const poly = pts => { g.beginPath(); pts.forEach((p, j) => j ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1])); g.closePath(); };
+
+  // stone slabs
+  for (let i = 0; i < 340; i++) {
+    const x = r() * W, y = r() * TH, s = 18 + r() * 60, n = 5 + (r() * 4 | 0), pts = [];
+    for (let k = 0; k < n; k++) { const a = k / n * Math.PI * 2 + r() * .5, rr = s * (.6 + r() * .5);
+      pts.push([x + Math.cos(a) * rr, y + Math.sin(a) * rr * .7]); }
+    const col = `hsl(${20 + r() * 16},${14 + r() * 16}%,${28 + r() * 24}%)`;
+    wrap(() => {
+      g.fillStyle = col; poly(pts); g.fill();
+      g.save(); g.translate(0, 2); g.strokeStyle = 'rgba(20,12,8,.5)'; g.lineWidth = 2; poly(pts); g.stroke(); g.restore();
+      g.save(); g.translate(-1, -1.5); g.strokeStyle = 'rgba(255,236,200,.13)'; g.lineWidth = 1.5; poly(pts); g.stroke(); g.restore();
+    });
+  }
+  // cracks
+  for (let i = 0; i < 70; i++) {
+    let x = r() * W, y = r() * TH; const seg = [[x, y]];
+    for (let k = 0; k < 6 + r() * 8; k++) { x += (r() - .5) * 30; y += 6 + r() * 16; seg.push([x, y]); }
+    wrap(() => { g.strokeStyle = 'rgba(18,10,6,.55)'; g.lineWidth = .8 + r() * 1.6; g.beginPath();
+      seg.forEach((p, j) => j ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1])); g.stroke(); });
+  }
+  // ledges with grass
+  for (let i = 0; i < 26; i++) {
+    const x = r() * W, y = r() * TH, w = 40 + r() * 110;
+    const tufts = []; for (let k = 0; k < w / 6; k++) tufts.push([x + r() * w, 3 + r() * 8, (r() - .5) * 4]);
+    const grassy = r() < .6;
+    wrap(() => {
+      g.fillStyle = 'rgba(15,9,6,.55)'; g.fillRect(x, y + 3, w, 5);
+      g.fillStyle = '#8a735e'; g.fillRect(x, y, w, 4);
+      g.fillStyle = 'rgba(255,240,210,.25)'; g.fillRect(x, y, w, 1);
+      if (grassy) { g.lineWidth = 1.4; for (const [tx, th, lean] of tufts) {
+        g.strokeStyle = th > 7 ? '#8fbf4a' : '#5f9a3a'; g.beginPath(); g.moveTo(tx, y + 1); g.lineTo(tx + lean, y - th); g.stroke(); } }
+    });
+  }
+  // moss
+  for (let i = 0; i < 40; i++) {
+    const x = r() * W, y = r() * TH, s = 8 + r() * 26;
+    wrap(() => { g.fillStyle = 'rgba(96,140,60,.22)'; g.beginPath(); g.ellipse(x, y, s, s * .5, r(), 0, 7); g.fill(); });
+  }
+  return t;
+})();
+
+// ---------- State ----------
+let state = 'title', best = 0;
+try { best = +localStorage.getItem('cliffside-best') || 0; } catch (e) {}
+let P, rocks, warns, parts, clouds, scroll, time, spawnT, shake;
+const keys = {};
+
+function reset() {
+  P = { x: W / 2, y: H * .72, anim: 0, moving: false, stam: 100, exhausted: false, hearts: 3, inv: 0, vy: 0, rot: 0, flash: 0 };
+  rocks = []; warns = []; parts = []; scroll = 0; time = 0; spawnT = 1.2; shake = 0;
+  clouds = Array.from({ length: 5 }, () => newCloud(rand() * H));
+}
+function newCloud(y) { return { x: rand() * W, y, s: 40 + rand() * 70, v: 6 + rand() * 12, a: .08 + rand() * .14 }; }
+reset();
+
+// ---------- Input ----------
+const map = { ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'down', ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right' };
+addEventListener('keydown', e => {
+  if (map[e.code]) { keys[map[e.code]] = true; e.preventDefault(); }
+  if (e.code === 'Space' || e.code === 'Enter') { e.preventDefault(); primary(); }
+  if ((e.code === 'KeyP' || e.code === 'Escape') && (state === 'play' || state === 'paused')) state = state === 'play' ? 'paused' : 'play';
+});
+addEventListener('keyup', e => { if (map[e.code]) keys[map[e.code]] = false; });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; if (state === 'play') state = 'paused'; });
+cvs.addEventListener('pointerdown', primary);
+document.querySelectorAll('#pad button').forEach(b => {
+  const k = b.dataset.k;
+  b.addEventListener('pointerdown', e => { e.preventDefault(); keys[k] = true; if (state !== 'play') primary(); });
+  for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) b.addEventListener(ev, () => keys[k] = false);
+});
+function primary() {
+  if (state === 'title' || state === 'over') { reset(); state = 'play'; }
+  else if (state === 'paused') state = 'play';
+}
+
+// ---------- Update ----------
+function spawnRock(x) {
+  const size = 12 + rand() * 24 + Math.min(time / 6, 10) * rand();
+  warns.push({ x: x ?? 30 + rand() * (W - 60), size, t: .75 });
+}
+function makeRock(w) {
+  const d = Math.min(1, time / 120), n = 8 + (rand() * 4 | 0), pts = [];
+  for (let k = 0; k < n; k++) pts.push(.72 + rand() * .32);
+  return { x: w.x, y: -w.size, size: w.size, pts, rot: rand() * 7, vr: (rand() - .5) * 6,
+    vx: (rand() - .5) * 40, vy: lerp(90, 200, d), g: lerp(380, 620, d),
+    bounceY: rand() < .35 ? H * (.15 + rand() * .45) : Infinity, shade: 30 + rand() * 15 };
+}
+function dust(x, y, n, col) {
+  for (let i = 0; i < n; i++) { const a = rand() * 7, s = 30 + rand() * 140;
+    parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 40, life: .5 + rand() * .5, max: 1, r: 2 + rand() * 4, col }); }
+}
+
+function update(dt) {
+  time += dt;
+  const d = Math.min(1, time / 120);
+
+  // clouds drift regardless of state
+  for (const c of clouds) { c.x += c.v * dt; if (c.x - c.s * 2 > W) c.x = -c.s * 2; }
+
+  if (state === 'falling') {
+    P.vy += 900 * dt; P.y += P.vy * dt; P.rot += 5 * dt;
+    if (P.y > H + 120) { state = 'over'; }
+  } else {
+    // player movement
+    let dx = (keys.right ? 1 : 0) - (keys.left ? 1 : 0), dy = (keys.down ? 1 : 0) - (keys.up ? 1 : 0);
+    if (P.exhausted) { dx = 0; dy = 0; P.y += 35 * dt; }
+    P.moving = !!(dx || dy);
+    if (P.moving) {
+      const len = Math.hypot(dx, dy), sp = 175;
+      P.x += dx / len * sp * dt; P.y += dy / len * sp * dt;
+      P.anim += dt * 11;
+      P.stam -= (dy < 0 ? 17 : 10) * dt;
+    } else P.stam += (P.exhausted ? 22 : 32) * dt;
+    if (P.stam <= 0) { P.stam = 0; P.exhausted = true; }
+    if (P.exhausted && P.stam >= 40) P.exhausted = false;
+    P.stam = Math.min(100, P.stam);
+    P.x = Math.max(24, Math.min(W - 24, P.x));
+    P.y = Math.min(H - 34, P.y);
+
+    // climbing past the upper band scrolls the mountain
+    const band = H * .42;
+    if (P.y < band) {
+      const diff = band - P.y; P.y = band; scroll += diff;
+      for (const r of rocks) { r.y += diff; r.bounceY += diff; }
+      for (const p of parts) p.y += diff;
+      for (const c of clouds) c.y += diff * 1.4;
+    }
+    if (P.inv > 0) P.inv -= dt;
+
+    // spawn rocks
+    spawnT -= dt;
+    if (spawnT <= 0) {
+      spawnRock();
+      if (d > .35 && rand() < d * .5) spawnRock();
+      if (d > .7 && rand() < .3) spawnRock(P.x + (rand() - .5) * 60); // aimed rock
+      spawnT = lerp(1.05, .3, d) * (.7 + rand() * .6);
+    }
+  }
+
+  for (const w of warns) { w.t -= dt; if (w.t <= 0) rocks.push(makeRock(w)); }
+  warns = warns.filter(w => w.t > 0);
+
+  for (const r of rocks) {
+    r.vy = Math.min(r.vy + r.g * dt, 900); r.y += r.vy * dt; r.x += r.vx * dt; r.rot += r.vr * dt;
+    if (r.y > r.bounceY) {
+      r.bounceY = Infinity; r.vy *= -.32; r.vx = (rand() - .5) * 220; r.vr *= -1.5;
+      dust(r.x, r.y + r.size * .6, 8, '150,125,100');
+    }
+    if (r.x < r.size || r.x > W - r.size) { r.vx *= -1; r.x = Math.max(r.size, Math.min(W - r.size, r.x)); }
+    if (state === 'play' && P.inv <= 0 && Math.hypot(r.x - P.x, r.y - (P.y - 4)) < r.size * .82 + 13) hit(r);
+  }
+  rocks = rocks.filter(r => r.y < H + 80 && !r.dead);
+
+  for (const p of parts) { p.vy += 300 * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt; }
+  parts = parts.filter(p => p.life > 0);
+  for (const c of clouds) if (c.y - c.s > H) Object.assign(c, newCloud(-c.s - rand() * 200));
+
+  if (shake > 0) shake -= dt;
+  if (P.flash > 0) P.flash -= dt;
+}
+
+function hit(r) {
+  r.dead = true; P.hearts--; P.inv = 1.6; shake = .35; P.flash = .15;
+  dust(r.x, r.y, 22, '160,135,110'); dust(P.x, P.y, 8, '255,90,80');
+  P.y = Math.min(H - 34, P.y + 28);
+  if (P.hearts <= 0) {
+    state = 'falling'; P.vy = -220;
+    const h = height(); if (h > best) { best = h; try { localStorage.setItem('cliffside-best', best); } catch (e) {} }
+  }
+}
+const height = () => Math.floor(scroll / 18);
+
+// ---------- Drawing ----------
+function limb(x1, y1, x2, y2, col, w) {
+  ctx.strokeStyle = col; ctx.lineWidth = w; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+}
+function arm(sx, sy, hx, hy, side) {
+  const ex = (sx + hx) / 2 + side * 5, ey = (sy + hy) / 2 + 2;
+  limb(sx, sy, ex, ey, '#2f68ad', 6.5);
+  limb(ex, ey, hx, hy, '#f0c9a0', 5);
+  ctx.fillStyle = '#e8bd92'; ctx.beginPath(); ctx.arc(hx, hy, 3.6, 0, 7); ctx.fill();
+}
+
+function drawLink() {
+  ctx.save(); ctx.translate(P.x, P.y);
+  // soft shadow on the rock face
+  ctx.fillStyle = 'rgba(0,0,0,.28)'; ctx.beginPath(); ctx.ellipse(5, 5, 17, 30, 0, 0, 7); ctx.fill();
+  if (state === 'falling') ctx.rotate(P.rot);
+  if (P.inv > 0 && state === 'play' && (P.inv * 14 | 0) % 2) { ctx.restore(); return; }
+
+  const ph = P.moving ? Math.sin(P.anim) : 0, idle = Math.sin(time * 2) * .8;
+  const legL = ph * 5, legR = -ph * 5;
+  // legs & boots
+  limb(-5, 9, -9, 22 + legL, '#5b3b24', 7.5); limb(5, 9, 9, 22 + legR, '#5b3b24', 7.5);
+  limb(-9, 21 + legL, -10, 28 + legL, '#3a2618', 8); limb(9, 21 + legR, 10, 28 + legR, '#3a2618', 8);
+
+  // tunic
+  ctx.fillStyle = '#3a7bc8';
+  ctx.beginPath(); ctx.moveTo(-10, -14); ctx.lineTo(10, -14); ctx.lineTo(13, 10); ctx.lineTo(7, 13);
+  ctx.lineTo(0, 11); ctx.lineTo(-7, 13); ctx.lineTo(-13, 10); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#2d629f'; ctx.fillRect(-1.5, -12, 3, 22);
+  ctx.fillStyle = '#e8e2cf'; ctx.fillRect(-10, -15, 20, 2.5); // collar trim
+  // belt
+  ctx.fillStyle = '#6b4526'; ctx.fillRect(-12, 3, 24, 3.5);
+  ctx.fillStyle = '#c9a44a'; ctx.fillRect(-2, 3, 4, 3.5);
+
+  // Master Sword on the back
+  limb(-11, 11, 9, -21, '#3b3552', 5);
+  ctx.fillStyle = '#d6b24c'; ctx.beginPath(); ctx.arc(-11, 11, 2.6, 0, 7); ctx.fill();
+  limb(4, -25, 14, -17, '#5a6fd0', 3.2);           // crossguard
+  limb(9, -21, 14, -30, '#4a3fa0', 3.4);           // grip
+  ctx.fillStyle = '#e9cf6a'; ctx.beginPath(); ctx.arc(9, -21, 1.8, 0, 7); ctx.fill();
+  ctx.fillStyle = '#6a7ae0'; ctx.beginPath(); ctx.arc(14.5, -31, 2.4, 0, 7); ctx.fill();
+
+  // head: ears, hair, ponytail
+  const hy = -23 + idle * .3;
+  ctx.fillStyle = '#f0c9a0';
+  ctx.beginPath(); ctx.moveTo(-6, hy - 1); ctx.lineTo(-16, hy - 6); ctx.lineTo(-6, hy + 3); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(6, hy - 1); ctx.lineTo(16, hy - 6); ctx.lineTo(6, hy + 3); ctx.fill();
+  ctx.fillStyle = '#e2b75a'; ctx.beginPath(); ctx.arc(0, hy, 8.5, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#b98a32'; ctx.lineWidth = 1;
+  for (const sx of [-4, 0, 4]) { ctx.beginPath(); ctx.moveTo(sx * .4, hy - 8); ctx.quadraticCurveTo(sx, hy, sx * 1.2, hy + 7); ctx.stroke(); }
+  ctx.fillStyle = '#d1a24a'; ctx.beginPath(); ctx.ellipse(0, hy + 10, 3, 5, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#7a4d2a'; ctx.fillRect(-2, hy + 6, 4, 2);
+
+  // arms reaching for holds (opposite to legs)
+  const armL = P.moving ? legR * 1.3 : idle, armR = P.moving ? legL * 1.3 : -idle;
+  arm(-10, -12, -17, -32 + armL, -1);
+  arm(10, -12, 17, -32 + armR, 1);
+  ctx.restore();
+}
+
+function drawRock(r) {
+  ctx.save(); ctx.translate(r.x, r.y);
+  ctx.fillStyle = 'rgba(0,0,0,.3)'; ctx.beginPath(); ctx.ellipse(6, 8, r.size, r.size * .85, 0, 0, 7); ctx.fill();
+  ctx.rotate(r.rot);
+  const n = r.pts.length;
+  ctx.beginPath();
+  r.pts.forEach((m, k) => { const a = k / n * Math.PI * 2; const x = Math.cos(a) * r.size * m, y = Math.sin(a) * r.size * m;
+    k ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+  ctx.closePath();
+  const g = ctx.createRadialGradient(-r.size * .35, -r.size * .35, r.size * .1, 0, 0, r.size * 1.1);
+  g.addColorStop(0, `hsl(28,12%,${r.shade + 22}%)`); g.addColorStop(1, `hsl(24,14%,${r.shade - 12}%)`);
+  ctx.fillStyle = g; ctx.fill();
+  ctx.strokeStyle = 'rgba(20,12,8,.7)'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.strokeStyle = 'rgba(20,12,8,.4)'; ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.moveTo(-r.size * .3, -r.size * .1); ctx.lineTo(r.size * .2, r.size * .25); ctx.lineTo(r.size * .1, r.size * .5); ctx.stroke();
+  ctx.restore();
+}
+
+function heart(x, y, s, fill) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  ctx.beginPath(); ctx.moveTo(0, 5);
+  ctx.bezierCurveTo(-9, -1, -6, -9, 0, -4); ctx.bezierCurveTo(6, -9, 9, -1, 0, 5); ctx.closePath();
+  ctx.fillStyle = fill ? '#e8333d' : 'rgba(40,20,20,.6)'; ctx.fill();
+  ctx.strokeStyle = '#fff4e6'; ctx.lineWidth = 1.3 / s * 1.4; ctx.stroke();
+  if (fill) { ctx.fillStyle = 'rgba(255,255,255,.5)'; ctx.beginPath(); ctx.ellipse(-3.5, -3, 1.6, 1, -.6, 0, 7); ctx.fill(); }
+  ctx.restore();
+}
+
+function staminaWheel() {
+  if (P.stam >= 100 && !P.exhausted) return;
+  const x = P.x + 30, y = P.y - 36, low = P.stam < 30 || P.exhausted;
+  ctx.save();
+  ctx.lineWidth = 6; ctx.lineCap = 'butt';
+  ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.beginPath(); ctx.arc(x, y, 11, 0, 7); ctx.stroke();
+  const col = P.exhausted ? (Math.sin(time * 18) > 0 ? '#ff6a3d' : '#d0392b') : low ? '#f2c14e' : '#7ee25a';
+  ctx.strokeStyle = col; ctx.beginPath();
+  ctx.arc(x, y, 11, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * P.stam / 100); ctx.stroke();
+  ctx.restore();
+}
+
+function text(s, x, y, size, col = '#f3ead2', align = 'center') {
+  ctx.font = `${size}px Georgia, serif`; ctx.textAlign = align; ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillText(s, x + 2, y + 2);
+  ctx.fillStyle = col; ctx.fillText(s, x, y);
+}
+
+function draw() {
+  ctx.save();
+  if (shake > 0) ctx.translate((rand() - .5) * 12 * shake / .35, (rand() - .5) * 12 * shake / .35);
+
+  const off = scroll % TH;
+  ctx.drawImage(wall, 0, off, W, TH); ctx.drawImage(wall, 0, off - TH, W, TH);
+
+  // warm light from above, haze below
+  let g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, 'rgba(255,220,160,.18)'); g.addColorStop(.5, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(120,160,200,.25)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  // falling-rock warnings
+  for (const w of warns) {
+    const a = .5 + .5 * Math.sin(w.t * 30);
+    ctx.fillStyle = `rgba(255,70,50,${.35 + a * .5})`;
+    ctx.beginPath(); ctx.moveTo(w.x, 30); ctx.lineTo(w.x - 13, 8); ctx.lineTo(w.x + 13, 8); ctx.closePath(); ctx.fill();
+    text('!', w.x, 17, 16, '#fff');
+    ctx.fillStyle = `rgba(255,70,50,${.06 + a * .06})`; ctx.fillRect(w.x - w.size, 0, w.size * 2, H);
+  }
+
+  for (const p of parts) { ctx.fillStyle = `rgba(${p.col},${Math.max(0, p.life)})`; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill(); }
+  if (state !== 'title') drawLink();
+  for (const r of rocks) drawRock(r);
+  if (state === 'play') staminaWheel();
+
+  // drifting cloud wisps in front for depth
+  for (const c of clouds) {
+    ctx.fillStyle = `rgba(235,240,245,${c.a})`;
+    for (const [ox, oy, k] of [[0, 0, 1], [c.s * .7, 6, .7], [-c.s * .7, 8, .6]]) {
+      ctx.beginPath(); ctx.ellipse(c.x + ox, c.y + oy, c.s * k, c.s * .35 * k, 0, 0, 7); ctx.fill(); }
+  }
+
+  // vignette
+  g = ctx.createRadialGradient(W / 2, H / 2, H * .3, W / 2, H / 2, H * .75);
+  g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,.5)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  if (P.flash > 0) { ctx.fillStyle = `rgba(255,40,40,${P.flash * 2})`; ctx.fillRect(0, 0, W, H); }
+  ctx.restore();
+
+  // HUD
+  if (state !== 'title') {
+    for (let i = 0; i < 3; i++) heart(26 + i * 30, 52, 1.5, i < P.hearts);
+    text(`${height()} m`, W - 18, 50, 26, '#f3ead2', 'right');
+    text(`best ${Math.max(best, state === 'play' ? 0 : best)} m`, W - 18, 76, 14, '#d8ccb0', 'right');
+  }
+
+  if (state === 'title') overlay(() => {
+    text('The Amazing Link\'s:', W / 2, H * .3, 48, '#f5dc8a');
+    text('Mountain Adventure', W / 2, H * .3 + 54, 48, '#f5dc8a');
+    text('Arrow keys / WASD to climb', W / 2, H * .62, 16, '#d8ccb0');
+    text('Rest when your stamina runs low', W / 2, H * .62 + 26, 16, '#d8ccb0');
+    text('P to pause', W / 2, H * .62 + 52, 16, '#d8ccb0');
+    if (Math.sin(time * 4) > -.3) text('Press SPACE or tap to start', W / 2, H * .82, 20, '#7ee25a');
+    if (best) text(`Best: ${best} m`, W / 2, H * .88, 16, '#d8ccb0');
+  });
+  if (state === 'paused') overlay(() => { text('Paused', W / 2, H * .45, 44, '#f5dc8a'); text('Press P or tap to resume', W / 2, H * .53, 18); });
+  if (state === 'over') overlay(() => {
+    text('You fell!', W / 2, H * .36, 48, '#f5dc8a');
+    text(`Height reached: ${height()} m`, W / 2, H * .46, 22);
+    text(height() >= best && best > 0 ? 'New best!' : `Best: ${best} m`, W / 2, H * .51, 18, '#7ee25a');
+    if (Math.sin(time * 4) > -.3) text('Press SPACE or tap to climb again', W / 2, H * .64, 18);
+  });
+}
+function overlay(fn) { ctx.fillStyle = 'rgba(8,14,20,.62)'; ctx.fillRect(0, 0, W, H); fn(); }
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(.05, (now - last) / 1000); last = now;
+  if (state === 'play' || state === 'falling') update(dt);
+  else { time += dt; for (const c of clouds) { c.x += c.v * dt; if (c.x - c.s * 2 > W) c.x = -c.s * 2; } }
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
