@@ -12,20 +12,35 @@
   #wrap { position:relative; height:100%; display:flex; align-items:center; justify-content:center; }
   canvas { display:block; height:min(100vh, 150vw); width:auto; aspect-ratio:2/3; max-width:100vw;
     box-shadow:0 0 60px #000c; border-radius:6px; }
-  #pad { display:none; position:absolute; bottom:18px; left:16px; width:150px; height:150px; }
-  #pad button { position:absolute; width:50px; height:50px; border-radius:12px; border:2px solid #f3ead288;
-    background:#0d182088; color:var(--fg); font-size:22px; touch-action:none; }
-  #pad [data-k=up]{left:50px;top:0} #pad [data-k=down]{left:50px;top:100px}
-  #pad [data-k=left]{left:0;top:50px} #pad [data-k=right]{left:100px;top:50px}
-  @media (pointer:coarse) { #pad { display:block; } }
+  #pad { display:none; position:absolute; bottom:22px; left:18px; width:150px; height:150px; border-radius:50%;
+    background:radial-gradient(circle, #0d182055 40%, #0d1820aa 100%); border:2px solid #f3ead255; touch-action:none; }
+  #pad .arm { position:absolute; background:#f3ead222; border-radius:10px; pointer-events:none; }
+  #pad .h { left:12px; right:12px; top:56px; height:38px; } #pad .v { top:12px; bottom:12px; left:56px; width:38px; }
+  #pad .tri { position:absolute; width:0; height:0; border:9px solid transparent; pointer-events:none; opacity:.55; transition:opacity .08s; }
+  #pad .tri.on { opacity:1; }
+  #pad [data-d=up] { left:66px; top:14px; border-bottom:12px solid var(--fg); border-top:0; }
+  #pad [data-d=down] { left:66px; bottom:14px; border-top:12px solid var(--fg); border-bottom:0; }
+  #pad [data-d=left] { top:66px; left:14px; border-right:12px solid var(--fg); border-left:0; }
+  #pad [data-d=right] { top:66px; right:14px; border-left:12px solid var(--fg); border-right:0; }
+  #knob { position:absolute; left:50%; top:50%; width:54px; height:54px; margin:-27px 0 0 -27px; border-radius:50%;
+    background:radial-gradient(circle at 35% 30%, #fff8e6, #d8ccb0 60%, #9d9178); box-shadow:0 3px 10px #000a;
+    pointer-events:none; opacity:.85; }
+  /* touch screens: game on top, d-pad in the space below it */
+  @media (pointer:coarse) {
+    #wrap { flex-direction:column; justify-content:center; gap:14px; }
+    canvas { height:min(calc(100dvh - 190px), 150vw); }
+    #pad { display:block; position:relative; left:auto; bottom:auto; flex:none; }
+  }
 </style>
 </head>
 <body>
 <div id="wrap">
   <canvas id="game"></canvas>
   <div id="pad">
-    <button data-k="up">▲</button><button data-k="left">◀</button>
-    <button data-k="right">▶</button><button data-k="down">▼</button>
+    <div class="arm h"></div><div class="arm v"></div>
+    <div class="tri" data-d="up"></div><div class="tri" data-d="down"></div>
+    <div class="tri" data-d="left"></div><div class="tri" data-d="right"></div>
+    <div id="knob"></div>
   </div>
 </div>
 <script>
@@ -96,7 +111,8 @@ const wall = (() => {
 let state = 'title', best = 0;
 try { best = +localStorage.getItem('cliffside-best') || 0; } catch (e) {}
 let P, rocks, warns, parts, clouds, scroll, time = 0, spawnT, shake, deco;
-let level = 1, clearT = 0, bannerT = 0, startY = 0, healed = false;
+let level = 1, clearT = 0, bannerT = 0, startY = 0, healed = false, bok = null;
+const BOK_AT = 2.6; // seconds into the celebration when the Bokoblin charges in
 const GOAL = 1800; // 100 m per level at 18 px per metre
 const keys = {};
 
@@ -107,7 +123,8 @@ function reset() {
   startLevel();
 }
 function startLevel() {
-  Object.assign(P, { x: W / 2, y: H * .72, moving: false, stam: 100, exhausted: false, inv: 0, vy: 0, rot: 0 });
+  Object.assign(P, { x: W / 2, y: H * .72, moving: false, stam: 100, exhausted: false, inv: 0, vx: 0, vy: 0, rot: 0, knocked: false });
+  bok = null;
   rocks = []; warns = []; parts = []; scroll = 0; spawnT = 1.2; shake = 0; bannerT = 2.2;
   deco = makeDeco(level);
 }
@@ -140,15 +157,29 @@ addEventListener('keydown', e => {
 addEventListener('keyup', e => { if (map[e.code]) keys[map[e.code]] = false; });
 addEventListener('blur', () => { for (const k in keys) keys[k] = false; if (state === 'play') state = 'paused'; });
 cvs.addEventListener('pointerdown', primary);
-document.querySelectorAll('#pad button').forEach(b => {
-  const k = b.dataset.k;
-  b.addEventListener('pointerdown', e => { e.preventDefault(); keys[k] = true; if (state !== 'play') primary(); });
-  for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) b.addEventListener(ev, () => keys[k] = false);
+// touch d-pad: keep a finger down and slide it around; direction follows the finger (8-way)
+const pad = document.getElementById('pad'), knob = document.getElementById('knob');
+const tris = Object.fromEntries([...pad.querySelectorAll('.tri')].map(t => [t.dataset.d, t]));
+let padId = null;
+function padSet(dx, dy) {
+  const len = Math.hypot(dx, dy), max = 46, k = len > max ? max / len : 1;
+  knob.style.transform = `translate(${dx * k}px, ${dy * k}px)`;
+  const nx = len > 14 ? dx / len : 0, ny = len > 14 ? dy / len : 0; // dead zone in the middle
+  const dirs = { right: nx > .38, left: nx < -.38, down: ny > .38, up: ny < -.38 };
+  for (const d in dirs) { keys[d] = dirs[d]; tris[d].classList.toggle('on', dirs[d]); }
+}
+function padMove(e) { const r = pad.getBoundingClientRect(); padSet(e.clientX - r.left - r.width / 2, e.clientY - r.top - r.height / 2); }
+pad.addEventListener('pointerdown', e => {
+  e.preventDefault(); padId = e.pointerId; pad.setPointerCapture(padId); padMove(e);
+  if (state !== 'play') primary();
 });
+pad.addEventListener('pointermove', e => { if (e.pointerId === padId) padMove(e); });
+for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture'])
+  pad.addEventListener(ev, e => { if (e.pointerId === padId) { padId = null; padSet(0, 0); } });
 function primary() {
   if (state === 'title' || state === 'over') { reset(); state = 'play'; }
   else if (state === 'paused') state = 'play';
-  else if (state === 'cleared' && clearT > 1.2) { level++; startLevel(); state = 'play'; }
+  else if (state === 'cleared' && P.knocked && P.y > H + 40) { level++; startLevel(); state = 'play'; }
 }
 
 // ---------- Update ----------
@@ -188,7 +219,29 @@ function update(dt) {
     clearT += dt;
     const stand = surfaceY() - 30;
     if (clearT < .7) { const e = clearT / .7; P.y = lerp(startY, stand, 1 - (1 - e) ** 2); P.anim += dt * 11; P.moving = true; }
-    else { P.moving = false; P.y = stand - Math.abs(Math.sin((clearT - .7) * 6)) * 12; if (rand() < dt * 16) sparkle(); }
+    else if (!P.knocked) {
+      P.moving = false;
+      if (clearT < BOK_AT) { P.y = stand - Math.abs(Math.sin((clearT - .7) * 6)) * 12; if (rand() < dt * 16) sparkle(); }
+      else P.y = stand;
+    } else {
+      // tumbling back down the cliff
+      P.vy += 900 * dt; P.y += P.vy * dt; P.x += P.vx * dt; P.rot += 7 * dt * bok.face;
+      if (P.x < 20 || P.x > W - 20) { P.vx *= -.5; P.x = Math.max(20, Math.min(W - 20, P.x)); }
+    }
+    // the Bokoblin charges, winds up, and clubs Link off the edge
+    if (clearT >= BOK_AT) {
+      bok.t += dt;
+      if (bok.phase === 'wait') { bok.phase = 'run'; bok.t = 0; }
+      if (bok.phase === 'run') {
+        const target = P.x - bok.face * 38;
+        bok.x += bok.face * 280 * dt; bok.anim += dt * 16;
+        if ((target - bok.x) * bok.face <= 0) { bok.x = target; bok.phase = 'windup'; bok.t = 0; }
+      } else if (bok.phase === 'windup' && bok.t > .45) {
+        bok.phase = 'swing'; bok.t = 0;
+        P.knocked = true; P.vy = -280; P.vx = bok.face * 150; shake = .4; P.flash = .12;
+        dust(P.x - bok.face * 10, P.y - 10, 16, '255,240,200');
+      } else if (bok.phase === 'swing' && bok.t > .3) { bok.phase = 'laugh'; bok.t = 0; }
+    }
   } else {
     // player movement
     let dx = (keys.right ? 1 : 0) - (keys.left ? 1 : 0), dy = (keys.down ? 1 : 0) - (keys.up ? 1 : 0);
@@ -254,6 +307,8 @@ function levelComplete() {
   state = 'cleared'; clearT = 0; startY = P.y; P.inv = 0; P.stam = 100; P.exhausted = false;
   for (const r of rocks) dust(r.x, r.y, 10, '160,135,110');
   rocks = []; warns = [];
+  bok = P.x < W / 2 ? { x: -60, face: 1 } : { x: W + 60, face: -1 };  // push toward the open side
+  Object.assign(bok, { phase: 'wait', t: 0, anim: 0 });
   healed = P.hearts < 3; P.hearts = Math.min(3, P.hearts + 1); // reward: recover a heart
   saveBest();
 }
@@ -283,7 +338,7 @@ function drawLink() {
   ctx.save(); ctx.translate(P.x, P.y);
   // soft shadow on the rock face
   ctx.fillStyle = 'rgba(0,0,0,.28)'; ctx.beginPath(); ctx.ellipse(5, 5, 17, 30, 0, 0, 7); ctx.fill();
-  if (state === 'falling') ctx.rotate(P.rot);
+  if (state === 'falling' || P.knocked) ctx.rotate(P.rot);
   if (P.inv > 0 && state === 'play' && (P.inv * 14 | 0) % 2) { ctx.restore(); return; }
 
   const ph = P.moving ? Math.sin(P.anim) : 0, idle = Math.sin(time * 2) * .8;
@@ -364,10 +419,64 @@ function drawLinkFront() {
   ctx.fillStyle = '#2a5fa8'; ctx.beginPath(); ctx.arc(-3, hy + 1.5, 1.4, 0, 7); ctx.arc(3, hy + 1.5, 1.4, 0, 7); ctx.fill();
   ctx.strokeStyle = '#8a4a36'; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.arc(0, hy + 3.5, 2.6, .2, Math.PI - .2); ctx.stroke();
   // arms up in a V, pumping with each hop
-  const pump = Math.sin(time * 12) * 3;
-  arm(-10, -12, -20, -40 + pump, -1);
-  arm(10, -12, 20, -40 - pump, 1);
+  if (clearT < BOK_AT) {
+    const pump = Math.sin(time * 12) * 3;
+    arm(-10, -12, -20, -40 + pump, -1);
+    arm(10, -12, 20, -40 - pump, 1);
+  } else {
+    arm(-10, -12, -15, 4, -1); arm(10, -12, 15, 4, 1);
+    text('!', 0, hy - 24, 26, '#ffd23f');
+  }
   ctx.restore();
+}
+
+// a red Bokoblin with a spiked club; drawn facing right, mirrored by b.face
+function drawBokoblin(b) {
+  const bob = b.phase === 'run' ? Math.abs(Math.sin(b.anim)) * 4 : b.phase === 'laugh' ? Math.abs(Math.sin(b.t * 14)) * 5 : 0;
+  const ground = surfaceY() - 2;
+  ctx.save(); ctx.translate(b.x, ground - 30);
+  ctx.fillStyle = 'rgba(0,0,0,.28)'; ctx.beginPath(); ctx.ellipse(0, 30, 18, 4.5, 0, 0, 7); ctx.fill();
+  ctx.translate(0, -bob); ctx.scale(b.face, 1);
+  const step = b.phase === 'run' ? Math.sin(b.anim) * 6 : 0;
+  const skin = '#d4523f', dark = '#a8392c';
+  // legs & feet
+  limb(-6, 12, -7 + step, 27, dark, 8); limb(6, 12, 7 - step, 27, dark, 8);
+  ctx.fillStyle = '#3a2618'; ctx.beginPath(); ctx.ellipse(-5 + step, 29, 6, 3, 0, 0, 7); ctx.ellipse(9 - step, 29, 6, 3, 0, 0, 7); ctx.fill();
+  // back arm
+  limb(-8, -4, -15, 10, dark, 6.5);
+  // pot belly, loincloth
+  ctx.fillStyle = skin; ctx.beginPath(); ctx.ellipse(0, 2, 16, 15, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#e8866c'; ctx.beginPath(); ctx.ellipse(4, 5, 9, 9, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#6b4526'; ctx.fillRect(-15, 10, 30, 4);
+  ctx.fillStyle = '#8a6a4a'; ctx.beginPath(); ctx.moveTo(-8, 13); ctx.lineTo(8, 13); ctx.lineTo(3, 24); ctx.lineTo(-4, 22); ctx.closePath(); ctx.fill();
+  // head: long ear, horn, big snout, tusks
+  const hx = 5, hy = -22;
+  ctx.fillStyle = skin;
+  ctx.beginPath(); ctx.moveTo(hx - 8, hy - 4); ctx.lineTo(hx - 26, hy - 14); ctx.lineTo(hx - 7, hy + 4); ctx.fill();
+  ctx.fillStyle = '#f1e6c8'; ctx.beginPath(); ctx.moveTo(hx - 3, hy - 10); ctx.quadraticCurveTo(hx - 2, hy - 24, hx + 5, hy - 26);
+  ctx.quadraticCurveTo(hx + 2, hy - 18, hx + 4, hy - 10); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = skin; ctx.beginPath(); ctx.ellipse(hx, hy, 13, 12, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#f0a08a'; ctx.beginPath(); ctx.ellipse(hx + 12, hy + 2, 7, 6, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#7a2a22'; ctx.beginPath(); ctx.arc(hx + 11, hy + 1, 1.3, 0, 7); ctx.arc(hx + 15, hy + 1, 1.3, 0, 7); ctx.fill();
+  ctx.fillStyle = '#fff3c4'; ctx.beginPath(); ctx.arc(hx + 5, hy - 4, 3.6, 0, 7); ctx.fill();
+  ctx.fillStyle = '#1a0f0a'; ctx.beginPath(); ctx.arc(hx + 6, hy - 4, 1.7, 0, 7); ctx.fill();
+  limb(hx + 1, hy - 9, hx + 9, hy - 7, '#5a1e18', 2);  // angry brow
+  const open = b.phase === 'laugh' ? 3 + Math.abs(Math.sin(b.t * 14)) * 3 : 2;
+  ctx.fillStyle = '#4a1612'; ctx.beginPath(); ctx.ellipse(hx + 8, hy + 8, 6, open, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#fff8e0'; ctx.beginPath(); ctx.moveTo(hx + 4, hy + 7); ctx.lineTo(hx + 5, hy + 1); ctx.lineTo(hx + 7, hy + 7); ctx.fill();
+  // front arm swinging the spiked club
+  const ang = { wait: -.3, run: -.3, windup: -1.9, swing: 1.5, laugh: .2 }[b.phase];
+  ctx.save(); ctx.translate(8, -5); ctx.rotate(ang);
+  limb(0, 0, 13, 2, skin, 7);
+  limb(14, 8, 14, -16, '#7a5230', 5);
+  limb(14, -8, 14, -30, '#5f3f22', 10);
+  ctx.fillStyle = '#e8e0c8';
+  for (const sy of [-12, -20, -28]) for (const sx of [-1, 1]) {
+    ctx.beginPath(); ctx.moveTo(14 + sx * 4, sy); ctx.lineTo(14 + sx * 9, sy - 2); ctx.lineTo(14 + sx * 4, sy - 4); ctx.fill(); }
+  ctx.fillStyle = '#e8b3a0'; ctx.beginPath(); ctx.arc(14, 2, 4, 0, 7); ctx.fill();
+  ctx.restore();
+  ctx.restore();
+  if (b.phase === 'laugh') text('Hah hah!', b.x, ground - 92 - bob, 16, '#ffd9c8');
 }
 
 // the grassy plateau that ends each level; s = screen y of its lip
@@ -477,7 +586,8 @@ function draw() {
   }
 
   for (const p of parts) { ctx.fillStyle = `rgba(${p.col},${Math.max(0, p.life)})`; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill(); }
-  if (state === 'cleared' && clearT >= .7) drawLinkFront();
+  if (bok && state === 'cleared' && clearT >= BOK_AT) drawBokoblin(bok);
+  if (state === 'cleared' && clearT >= .7 && !P.knocked) drawLinkFront();
   else if (state !== 'title') drawLink();
   for (const r of rocks) drawRock(r);
   if (state === 'play') staminaWheel();
@@ -516,8 +626,9 @@ function draw() {
     ctx.globalAlpha = a;
     ctx.fillStyle = 'rgba(8,14,20,.6)'; ctx.fillRect(0, H * .52, W, 128);
     text(`Level ${level} Complete!`, W / 2, H * .52 + 36, 38, '#f5dc8a');
-    text(healed ? 'You reached the plateau. +1 heart' : 'You reached the plateau.', W / 2, H * .52 + 72, 16);
-    if (clearT > 1.2 && Math.sin(time * 4) > -.3) text(`Press SPACE or tap for Level ${level + 1}`, W / 2, H * .52 + 102, 17, '#7ee25a');
+    text(P.knocked ? 'A Bokoblin knocked you off the mountain!' : healed ? 'You reached the plateau. +1 heart' : 'You reached the plateau.',
+      W / 2, H * .52 + 72, 16, P.knocked ? '#ffb3a0' : '#f3ead2');
+    if (P.knocked && P.y > H + 40 && Math.sin(time * 4) > -.3) text(`Press SPACE or tap to climb Level ${level + 1}`, W / 2, H * .52 + 102, 17, '#7ee25a');
     ctx.globalAlpha = 1;
   }
 
