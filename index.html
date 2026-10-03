@@ -124,9 +124,10 @@ const wall = (() => {
 let state = 'title', best = 0;
 try { best = +localStorage.getItem('cliffside-best') || 0; } catch (e) {}
 let rocks, warns, parts, clouds, scroll, time = 0, spawnT, shake, deco;
-let level = 1, clearT = 0, bannerT = 0, startY = 0, healed = false, bok = null;
-const BOK_AT = 2.6; // seconds into the celebration when the Bokoblin charges in
+let level = 1, clearT = 0, bannerT = 0, startY = 0, healed = false, fadeT = 0, fadeIn = 0, pausedFrom = 'play';
 const GOAL = 1800; // 100 m per level at 18 px per metre
+// the plateau is drawn in perspective: depth d runs from 0 (cliff edge) to DMAX (foot of the next cliff)
+const DMAX = 2, WALK = .55, PLAT_HW = W * 1.6; // wide enough to reach both screen edges at the far cliff
 const keys = {};
 
 function reset() {
@@ -136,39 +137,57 @@ function reset() {
   startLevel();
 }
 function startLevel() {
-  Object.assign(P, { x: W / 2, y: H * .72, moving: false, stam: 100, exhausted: false, inv: 0, vx: 0, vy: 0, rot: 0, knocked: false });
-  bok = null;
+  Object.assign(P, { x: W / 2, y: H * .72, moving: false, stam: 100, exhausted: false, inv: 0, vy: 0, rot: 0, px: W / 2, pd: 0, face: 'back' });
   rocks = []; warns = []; parts = []; scroll = 0; spawnT = 1.2; shake = 0; bannerT = 2.2;
   deco = makeDeco(level);
 }
-// scenery for this level's plateau, in coordinates relative to the plateau lip
+// scenery for this level's plateau; props use world x and depth d
 function makeDeco(seed) {
   const r = rng(seed * 7919 + 3), ridge = (step, lo, hi) => {
     const pts = []; for (let x = -20; x <= W + 40; x += step * (.6 + r() * .8)) pts.push([x, lo + r() * (hi - lo)]); return pts; };
+  const wx = () => W / 2 + (r() * 2 - 1) * W;
   return {
-    far: ridge(46, 60, 140), near: ridge(34, 20, 60),
-    trees: [[40 + r() * 120, 10 + r() * 8], [W - 60 - r() * 120, 6 + r() * 8]],
-    bushes: Array.from({ length: 7 }, () => [r() * W, 8 + r() * 28, 6 + r() * 8]),
-    flowers: Array.from({ length: 26 }, () => [r() * W, 4 + r() * 36, ['#fff4e0', '#f5d04a', '#e86a8a', '#9ec8ff'][r() * 4 | 0]]),
+    far: ridge(46, 40, 110), near: ridge(34, 14, 44),
+    trees: Array.from({ length: 6 }, () => [wx(), .2 + r() * 1.6]),
+    bushes: Array.from({ length: 12 }, () => [wx(), .1 + r() * 1.8, 6 + r() * 8]),
+    flowers: Array.from({ length: 90 }, () => [wx(), r() * DMAX, ['#fff4e0', '#f5d04a', '#e86a8a', '#9ec8ff'][r() * 4 | 0]]),
     blades: Array.from({ length: 110 }, () => [r() * W, 4 + r() * 9, (r() - .5) * 5]),
+    jag: Array.from({ length: 24 }, () => [r() * 22, r() * 22]),
   };
 }
 function newCloud(y) { return { x: rand() * W, y, s: 40 + rand() * 70, v: 6 + rand() * 12, a: .08 + rand() * .14 }; }
 const surfaceY = () => scroll - GOAL + H * .3;  // screen y of the plateau lip
+const PAN = () => H * .58;                      // extra scroll that brings the plateau into full view
+// perspective helpers for a plateau whose lip is at screen y = s
+const horizon = s => s - H * .75;
+const scaleAt = d => 1 / (1 + d);
+const yAt = (s, d) => horizon(s) + H * .75 * scaleAt(d);
+const xAt = (x, d) => W / 2 + (x - W / 2) * scaleAt(d);
 const height = () => Math.min(100, Math.floor(scroll / 18));
 const total = () => (level - 1) * 100 + height();
 function saveBest() { if (total() > best) { best = total(); try { localStorage.setItem('cliffside-best', best); } catch (e) {} } }
 reset();
 
 // ---------- Input ----------
+// `keys` is the merged state update()/draw() read; each source (keyboard, touch d-pad,
+// gamepad) owns its own map so one source releasing a direction can't clobber another's.
+const kbKeys = {}, touchKeys = {}, padKeys = {};
+function syncKeys() { for (const d of ['up', 'down', 'left', 'right']) keys[d] = kbKeys[d] || touchKeys[d] || padKeys[d]; }
 const map = { ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'down', ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right' };
 addEventListener('keydown', e => {
-  if (map[e.code]) { keys[map[e.code]] = true; e.preventDefault(); }
+  if (map[e.code]) { kbKeys[map[e.code]] = true; syncKeys(); e.preventDefault(); }
   if (e.code === 'Space' || e.code === 'Enter') { e.preventDefault(); primary(); }
-  if ((e.code === 'KeyP' || e.code === 'Escape') && (state === 'play' || state === 'paused')) state = state === 'play' ? 'paused' : 'play';
+  if (e.code === 'KeyP' || e.code === 'Escape') togglePause();
 });
-addEventListener('keyup', e => { if (map[e.code]) keys[map[e.code]] = false; });
-addEventListener('blur', () => { for (const k in keys) keys[k] = false; if (state === 'play') state = 'paused'; });
+addEventListener('keyup', e => { if (map[e.code]) { kbKeys[map[e.code]] = false; syncKeys(); } });
+addEventListener('blur', () => {
+  for (const d of ['up', 'down', 'left', 'right']) kbKeys[d] = touchKeys[d] = padKeys[d] = keys[d] = false;
+  if (state === 'play' || state === 'plateau') togglePause();
+});
+function togglePause() {
+  if (state === 'play' || state === 'plateau') { pausedFrom = state; state = 'paused'; }
+  else if (state === 'paused') state = pausedFrom;
+}
 cvs.addEventListener('pointerdown', primary);
 // touch d-pad: keep a finger down and slide it around; direction follows the finger (8-way)
 const pad = document.getElementById('pad'), knob = document.getElementById('knob');
@@ -179,7 +198,8 @@ function padSet(dx, dy) {
   knob.style.transform = `translate(${dx * k}px, ${dy * k}px)`;
   const nx = len > 14 ? dx / len : 0, ny = len > 14 ? dy / len : 0; // dead zone in the middle
   const dirs = { right: nx > .38, left: nx < -.38, down: ny > .38, up: ny < -.38 };
-  for (const d in dirs) { keys[d] = dirs[d]; tris[d].classList.toggle('on', dirs[d]); }
+  for (const d in dirs) { touchKeys[d] = dirs[d]; tris[d].classList.toggle('on', dirs[d]); }
+  syncKeys();
 }
 function padMove(e) { const r = pad.getBoundingClientRect(); padSet(e.clientX - r.left - r.width / 2, e.clientY - r.top - r.height / 2); }
 pad.addEventListener('pointerdown', e => {
@@ -191,8 +211,33 @@ for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture'])
   pad.addEventListener(ev, e => { if (e.pointerId === padId) { padId = null; padSet(0, 0); } });
 function primary() {
   if (state === 'title' || state === 'over') { reset(); state = 'play'; }
-  else if (state === 'paused') state = 'play';
-  else if (state === 'cleared' && P.knocked && P.y > H + 40) { level++; startLevel(); state = 'play'; }
+  else if (state === 'paused') state = pausedFrom;
+}
+
+// Switch controller (or any standard gamepad) paired over Bluetooth: polled per frame
+// since the Gamepad API has no held-button/stick event stream, and merged into the
+// same `keys`/`primary()`/`togglePause()` used by keyboard and the touch d-pad.
+let padPrimaryHeld = false, padStartHeld = false;
+function pollGamepad() {
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  const gp = [...pads].find(g => g);
+  const dz = .25;
+  const ax = gp ? gp.axes[0] ?? 0 : 0, ay = gp ? gp.axes[1] ?? 0 : 0;
+  padKeys.right = !!(gp && (ax > dz || gp.buttons[15]?.pressed));
+  padKeys.left = !!(gp && (ax < -dz || gp.buttons[14]?.pressed));
+  padKeys.down = !!(gp && (ay > dz || gp.buttons[13]?.pressed));
+  padKeys.up = !!(gp && (ay < -dz || gp.buttons[12]?.pressed));
+  syncKeys();
+  if (!gp) { padPrimaryHeld = padStartHeld = false; return; }
+
+  // face buttons (index 0/1 covers both under Nintendo's swapped B/A glyph layout)
+  const primaryDown = !!(gp.buttons[0]?.pressed || gp.buttons[1]?.pressed);
+  if (primaryDown && !padPrimaryHeld) primary();
+  padPrimaryHeld = primaryDown;
+
+  const startDown = !!gp.buttons[9]?.pressed;
+  if (startDown && !padStartHeld) togglePause();
+  padStartHeld = startDown;
 }
 
 // ---------- Update ----------
@@ -211,15 +256,11 @@ function dust(x, y, n, col) {
   for (let i = 0; i < n; i++) { const a = rand() * 7, s = 30 + rand() * 140;
     parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 40, life: .5 + rand() * .5, r: 2 + rand() * 4, col }); }
 }
-function sparkle() {
-  const a = -Math.PI / 2 + (rand() - .5) * 2.2, s = 120 + rand() * 180;
-  parts.push({ x: P.x, y: P.y - 30, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: .8 + rand() * .6, r: 2 + rand() * 2.5,
-    g: 160, col: ['255,220,110', '255,250,220', '140,230,255', '255,140,170'][rand() * 4 | 0] });
-}
 
 function update(dt) {
   time += dt;
   if (bannerT > 0) bannerT -= dt;
+  if (fadeIn > 0) fadeIn -= dt;
 
   // clouds drift regardless of state
   for (const c of clouds) { c.x += c.v * dt; if (c.x - c.s * 2 > W) c.x = -c.s * 2; }
@@ -228,33 +269,35 @@ function update(dt) {
     P.vy += 900 * dt; P.y += P.vy * dt; P.rot += 5 * dt;
     if (P.y > H + 120) { state = 'over'; }
   } else if (state === 'cleared') {
-    // pull up onto the plateau, then hop and cheer
+    // pull up over the lip, then the view pans out across the plateau
     clearT += dt;
-    const stand = surfaceY() - 30;
-    if (clearT < .7) { const e = clearT / .7; P.y = lerp(startY, stand, 1 - (1 - e) ** 2); P.anim += dt * 11; P.moving = true; }
-    else if (!P.knocked) {
-      P.moving = false;
-      if (clearT < BOK_AT) { P.y = stand - Math.abs(Math.sin((clearT - .7) * 6)) * 12; if (rand() < dt * 16) sparkle(); }
-      else P.y = stand;
+    if (clearT < .7) {
+      const e = clearT / .7;
+      P.y = lerp(startY, yAt(surfaceY(), P.pd) - 28, 1 - (1 - e) ** 2); P.anim += dt * 11; P.moving = true;
     } else {
-      // tumbling back down the cliff
-      P.vy += 900 * dt; P.y += P.vy * dt; P.x += P.vx * dt; P.rot += 7 * dt * bok.face;
-      if (P.x < 20 || P.x > W - 20) { P.vx *= -.5; P.x = Math.max(20, Math.min(W - 20, P.x)); }
+      P.moving = false;
+      const e = Math.min(1, (clearT - .7) / 1.4);
+      scroll = GOAL + PAN() * e * e * (3 - 2 * e);
+      if (e >= 1) state = 'plateau';
     }
-    // the Bokoblin charges, winds up, and clubs Link off the edge
-    if (clearT >= BOK_AT) {
-      bok.t += dt;
-      if (bok.phase === 'wait') { bok.phase = 'run'; bok.t = 0; }
-      if (bok.phase === 'run') {
-        const target = P.x - bok.face * 38;
-        bok.x += bok.face * 280 * dt; bok.anim += dt * 16;
-        if ((target - bok.x) * bok.face <= 0) { bok.x = target; bok.phase = 'windup'; bok.t = 0; }
-      } else if (bok.phase === 'windup' && bok.t > .45) {
-        bok.phase = 'swing'; bok.t = 0;
-        P.knocked = true; P.vy = -280; P.vx = bok.face * 150; shake = .4; P.flash = .12;
-        dust(P.x - bok.face * 10, P.y - 10, 16, '255,240,200');
-      } else if (bok.phase === 'swing' && bok.t > .3) { bok.phase = 'laugh'; bok.t = 0; }
+  } else if (state === 'plateau') {
+    // walk around: up heads into the distance, down comes back toward the edge
+    clearT += dt;
+    const dx = (keys.right ? 1 : 0) - (keys.left ? 1 : 0), dy = (keys.down ? 1 : 0) - (keys.up ? 1 : 0);
+    P.moving = !!(dx || dy);
+    if (P.moving) {
+      const len = Math.hypot(dx, dy);
+      P.px += dx / len * 170 * dt; P.pd -= dy / len * WALK * dt; P.anim += dt * 9;
+      if (dy > 0) P.face = 'front'; else if (dy < 0) P.face = 'back';
     }
+    P.pd = Math.max(.02, Math.min(DMAX, P.pd));
+    const lim = Math.min(PLAT_HW - 20, (W / 2 - 22) / scaleAt(P.pd)); // stay on screen
+    P.px = Math.max(W / 2 - lim, Math.min(W / 2 + lim, P.px));
+    if (P.pd >= DMAX) { state = 'enter'; fadeT = 0; P.face = 'back'; }
+  } else if (state === 'enter') {
+    // reached the next cliff: grab on and fade into the next level
+    fadeT += dt; P.moving = true; P.anim += dt * 11;
+    if (fadeT >= .7) { level++; startLevel(); state = 'play'; fadeIn = .6; }
   } else {
     // player movement
     let dx = (keys.right ? 1 : 0) - (keys.left ? 1 : 0), dy = (keys.down ? 1 : 0) - (keys.up ? 1 : 0);
@@ -318,10 +361,9 @@ function update(dt) {
 
 function levelComplete() {
   state = 'cleared'; clearT = 0; startY = P.y; P.inv = 0; P.stam = 100; P.exhausted = false;
+  P.px = P.x; P.pd = .02; P.face = 'back';
   for (const r of rocks) dust(r.x, r.y, 10, '160,135,110');
   rocks = []; warns = [];
-  bok = P.x < W / 2 ? { x: -60, face: 1 } : { x: W + 60, face: -1 };  // push toward the open side
-  Object.assign(bok, { phase: 'wait', t: 0, anim: 0 });
   healed = P.hearts < 3; P.hearts = Math.min(3, P.hearts + 1); // reward: recover a heart
   saveBest();
 }
@@ -347,15 +389,17 @@ function arm(sx, sy, hx, hy, side) {
   ctx.fillStyle = '#e8bd92'; ctx.beginPath(); ctx.arc(hx, hy, 3.6, 0, 7); ctx.fill();
 }
 
-function drawLink() {
-  ctx.save(); ctx.translate(P.x, P.y);
-  // soft shadow on the rock face
-  ctx.fillStyle = 'rgba(0,0,0,.28)'; ctx.beginPath(); ctx.ellipse(5, 5, 17, 30, 0, 0, 7); ctx.fill();
-  if (state === 'falling' || P.knocked) ctx.rotate(P.rot);
+// Link seen from behind; pose 'climb' reaches for holds, 'walk' strides with arms down
+function drawLink(x = P.x, y = P.y, s = 1, pose = 'climb') {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  ctx.fillStyle = 'rgba(0,0,0,.28)'; ctx.beginPath();
+  if (pose === 'climb') ctx.ellipse(5, 5, 17, 30, 0, 0, 7); else ctx.ellipse(0, 29, 14, 4, 0, 0, 7);
+  ctx.fill();
+  if (state === 'falling') ctx.rotate(P.rot);
   if (P.inv > 0 && state === 'play' && (P.inv * 14 | 0) % 2) { ctx.restore(); return; }
 
   const ph = P.moving ? Math.sin(P.anim) : 0, idle = Math.sin(time * 2) * .8;
-  const legL = ph * 5, legR = -ph * 5;
+  const legL = ph * (pose === 'climb' ? 5 : 3), legR = -legL;
   // legs & boots
   limb(-5, 9, -9, 22 + legL, '#5b3b24', 7.5); limb(5, 9, 9, 22 + legR, '#5b3b24', 7.5);
   limb(-9, 21 + legL, -10, 28 + legL, '#3a2618', 8); limb(9, 21 + legR, 10, 28 + legR, '#3a2618', 8);
@@ -389,26 +433,30 @@ function drawLink() {
   ctx.fillStyle = '#d1a24a'; ctx.beginPath(); ctx.ellipse(0, hy + 10, 3, 5, 0, 0, 7); ctx.fill();
   ctx.fillStyle = '#7a4d2a'; ctx.fillRect(-2, hy + 6, 4, 2);
 
-  // arms reaching for holds (opposite to legs)
-  const armL = P.moving ? legR * 1.3 : idle, armR = P.moving ? legL * 1.3 : -idle;
-  arm(-10, -12, -17, -32 + armL, -1);
-  arm(10, -12, 17, -32 + armR, 1);
+  if (pose === 'climb') {
+    // arms reaching for holds (opposite to legs)
+    const armL = P.moving ? legR * 1.3 : idle, armR = P.moving ? legL * 1.3 : -idle;
+    arm(-10, -12, -17, -32 + armL, -1);
+    arm(10, -12, 17, -32 + armR, 1);
+  } else {
+    const sw = ph * 4;
+    arm(-10, -12, -14, 5 + sw, -1); arm(10, -12, 14, 5 - sw, 1);
+  }
   ctx.restore();
 }
 
-// Link facing us on the plateau, arms raised in celebration
-function drawLinkFront() {
-  ctx.save(); ctx.translate(P.x, P.y);
-  const ground = surfaceY() - 2 - P.y, lift = ground - 28;
-  ctx.fillStyle = 'rgba(0,0,0,.28)'; ctx.beginPath(); ctx.ellipse(0, ground, 15 - lift * .3, 4, 0, 0, 7); ctx.fill();
+// Link walking toward us on the plateau
+function drawLinkFront(x, y, s) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  ctx.fillStyle = 'rgba(0,0,0,.28)'; ctx.beginPath(); ctx.ellipse(0, 29, 14, 4, 0, 0, 7); ctx.fill();
   // sword hilt peeking over the shoulder
   limb(5, -15, 13, -18, '#5a6fd0', 3.2);
   limb(9, -17, 14, -30, '#4a3fa0', 3.4);
   ctx.fillStyle = '#6a7ae0'; ctx.beginPath(); ctx.arc(14.5, -31, 2.4, 0, 7); ctx.fill();
   // legs & boots
-  const kick = Math.max(0, -lift) > 4 ? 3 : 0;
-  limb(-5, 9, -7 - kick, 22, '#5b3b24', 7.5); limb(5, 9, 7 + kick, 22, '#5b3b24', 7.5);
-  limb(-7 - kick, 21, -8 - kick, 28, '#3a2618', 8); limb(7 + kick, 21, 8 + kick, 28, '#3a2618', 8);
+  const ph = P.moving ? Math.sin(P.anim) : 0, st = ph * 3;
+  limb(-5, 9, -7, 22 + st, '#5b3b24', 7.5); limb(5, 9, 7, 22 - st, '#5b3b24', 7.5);
+  limb(-7, 21 + st, -8, 28 + st, '#3a2618', 8); limb(7, 21 - st, 8, 28 - st, '#3a2618', 8);
   // tunic, belt
   ctx.fillStyle = '#3a7bc8';
   ctx.beginPath(); ctx.moveTo(-10, -14); ctx.lineTo(10, -14); ctx.lineTo(13, 10); ctx.lineTo(7, 13);
@@ -430,94 +478,85 @@ function drawLinkFront() {
   ctx.lineTo(3, hy - 1); ctx.lineTo(5, hy - 9); ctx.lineTo(8.4, hy - 2); ctx.closePath(); ctx.fill();
   ctx.fillRect(-8.6, hy - 3, 2.2, 9); ctx.fillRect(6.4, hy - 3, 2.2, 9);
   ctx.fillStyle = '#2a5fa8'; ctx.beginPath(); ctx.arc(-3, hy + 1.5, 1.4, 0, 7); ctx.arc(3, hy + 1.5, 1.4, 0, 7); ctx.fill();
-  ctx.strokeStyle = '#8a4a36'; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.arc(0, hy + 3.5, 2.6, .2, Math.PI - .2); ctx.stroke();
-  // arms up in a V, pumping with each hop
-  if (clearT < BOK_AT) {
-    const pump = Math.sin(time * 12) * 3;
-    arm(-10, -12, -20, -40 + pump, -1);
-    arm(10, -12, 20, -40 - pump, 1);
-  } else {
-    arm(-10, -12, -15, 4, -1); arm(10, -12, 15, 4, 1);
-    text('!', 0, hy - 24, 26, '#ffd23f');
-  }
+  ctx.strokeStyle = '#8a4a36'; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.arc(0, hy + 4.5, 1.8, .3, Math.PI - .3); ctx.stroke();
+  // arms swinging at his sides
+  const sw = ph * 4;
+  arm(-10, -12, -14, 5 - sw, -1); arm(10, -12, 14, 5 + sw, 1);
   ctx.restore();
 }
 
-// a red Bokoblin with a spiked club; drawn facing right, mirrored by b.face
-function drawBokoblin(b) {
-  const bob = b.phase === 'run' ? Math.abs(Math.sin(b.anim)) * 4 : b.phase === 'laugh' ? Math.abs(Math.sin(b.t * 14)) * 5 : 0;
-  const ground = surfaceY() - 2;
-  ctx.save(); ctx.translate(b.x, ground - 30);
-  ctx.fillStyle = 'rgba(0,0,0,.28)'; ctx.beginPath(); ctx.ellipse(0, 30, 18, 4.5, 0, 0, 7); ctx.fill();
-  ctx.translate(0, -bob); ctx.scale(b.face, 1);
-  const step = b.phase === 'run' ? Math.sin(b.anim) * 6 : 0;
-  const skin = '#d4523f', dark = '#a8392c';
-  // legs & feet
-  limb(-6, 12, -7 + step, 27, dark, 8); limb(6, 12, 7 - step, 27, dark, 8);
-  ctx.fillStyle = '#3a2618'; ctx.beginPath(); ctx.ellipse(-5 + step, 29, 6, 3, 0, 0, 7); ctx.ellipse(9 - step, 29, 6, 3, 0, 0, 7); ctx.fill();
-  // back arm
-  limb(-8, -4, -15, 10, dark, 6.5);
-  // pot belly, loincloth
-  ctx.fillStyle = skin; ctx.beginPath(); ctx.ellipse(0, 2, 16, 15, 0, 0, 7); ctx.fill();
-  ctx.fillStyle = '#e8866c'; ctx.beginPath(); ctx.ellipse(4, 5, 9, 9, 0, 0, 7); ctx.fill();
-  ctx.fillStyle = '#6b4526'; ctx.fillRect(-15, 10, 30, 4);
-  ctx.fillStyle = '#8a6a4a'; ctx.beginPath(); ctx.moveTo(-8, 13); ctx.lineTo(8, 13); ctx.lineTo(3, 24); ctx.lineTo(-4, 22); ctx.closePath(); ctx.fill();
-  // head: long ear, horn, big snout, tusks
-  const hx = 5, hy = -22;
-  ctx.fillStyle = skin;
-  ctx.beginPath(); ctx.moveTo(hx - 8, hy - 4); ctx.lineTo(hx - 26, hy - 14); ctx.lineTo(hx - 7, hy + 4); ctx.fill();
-  ctx.fillStyle = '#f1e6c8'; ctx.beginPath(); ctx.moveTo(hx - 3, hy - 10); ctx.quadraticCurveTo(hx - 2, hy - 24, hx + 5, hy - 26);
-  ctx.quadraticCurveTo(hx + 2, hy - 18, hx + 4, hy - 10); ctx.closePath(); ctx.fill();
-  ctx.fillStyle = skin; ctx.beginPath(); ctx.ellipse(hx, hy, 13, 12, 0, 0, 7); ctx.fill();
-  ctx.fillStyle = '#f0a08a'; ctx.beginPath(); ctx.ellipse(hx + 12, hy + 2, 7, 6, 0, 0, 7); ctx.fill();
-  ctx.fillStyle = '#7a2a22'; ctx.beginPath(); ctx.arc(hx + 11, hy + 1, 1.3, 0, 7); ctx.arc(hx + 15, hy + 1, 1.3, 0, 7); ctx.fill();
-  ctx.fillStyle = '#fff3c4'; ctx.beginPath(); ctx.arc(hx + 5, hy - 4, 3.6, 0, 7); ctx.fill();
-  ctx.fillStyle = '#1a0f0a'; ctx.beginPath(); ctx.arc(hx + 6, hy - 4, 1.7, 0, 7); ctx.fill();
-  limb(hx + 1, hy - 9, hx + 9, hy - 7, '#5a1e18', 2);  // angry brow
-  const open = b.phase === 'laugh' ? 3 + Math.abs(Math.sin(b.t * 14)) * 3 : 2;
-  ctx.fillStyle = '#4a1612'; ctx.beginPath(); ctx.ellipse(hx + 8, hy + 8, 6, open, 0, 0, 7); ctx.fill();
-  ctx.fillStyle = '#fff8e0'; ctx.beginPath(); ctx.moveTo(hx + 4, hy + 7); ctx.lineTo(hx + 5, hy + 1); ctx.lineTo(hx + 7, hy + 7); ctx.fill();
-  // front arm swinging the spiked club
-  const ang = { wait: -.3, run: -.3, windup: -1.9, swing: 1.5, laugh: .2 }[b.phase];
-  ctx.save(); ctx.translate(8, -5); ctx.rotate(ang);
-  limb(0, 0, 13, 2, skin, 7);
-  limb(14, 8, 14, -16, '#7a5230', 5);
-  limb(14, -8, 14, -30, '#5f3f22', 10);
-  ctx.fillStyle = '#e8e0c8';
-  for (const sy of [-12, -20, -28]) for (const sx of [-1, 1]) {
-    ctx.beginPath(); ctx.moveTo(14 + sx * 4, sy); ctx.lineTo(14 + sx * 9, sy - 2); ctx.lineTo(14 + sx * 4, sy - 4); ctx.fill(); }
-  ctx.fillStyle = '#e8b3a0'; ctx.beginPath(); ctx.arc(14, 2, 4, 0, 7); ctx.fill();
-  ctx.restore();
-  ctx.restore();
-  if (b.phase === 'laugh') text('Hah hah!', b.x, ground - 92 - bob, 16, '#ffd9c8');
+// Link standing on the plateau, scaled for how far away he is
+function drawPlateauLink(s) {
+  const k = scaleAt(P.pd), x = xAt(P.px, P.pd), feet = yAt(s, P.pd);
+  if (state === 'enter') drawLink(x, feet - 28 * k - fadeT * 40 * k, k, 'climb');
+  else if (P.face === 'front') drawLinkFront(x, feet - 28 * k, k);
+  else drawLink(x, feet - 28 * k, k, 'walk');
 }
 
-// the grassy plateau that ends each level; s = screen y of its lip
-function drawPlateau(s) {
-  const top = s - 46, d = deco;
-  let g = ctx.createLinearGradient(0, top - 320, 0, top);
-  g.addColorStop(0, '#5f9ad6'); g.addColorStop(.7, '#a9cbe6'); g.addColorStop(1, '#f4dcae');
-  ctx.fillStyle = g; ctx.fillRect(0, 0, W, top + 1);
-  const ridge = (pts, col) => { ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(-20, top + 1);
-    for (const [x, h] of pts) ctx.lineTo(x, top - h); ctx.lineTo(W + 40, top + 1); ctx.closePath(); ctx.fill(); };
+// the next level's cliff, rising across the whole far side of the plateau
+function drawNextCliff(s) {
+  const k = scaleAt(DMAX), base = yAt(s, DMAX), half = W / 2 + 10, top = -10;
+  if (base < top) return;
+  const jag = deco.jag, n = jag.length - 1;
+  ctx.save(); ctx.beginPath();
+  for (let i = 0; i <= n; i++) ctx.lineTo(W / 2 - half - jag[i][0] * k * (1 - i / n * .5), lerp(base, top, i / n));
+  for (let i = n; i >= 0; i--) ctx.lineTo(W / 2 + half + jag[i][1] * k * (1 - i / n * .5), lerp(base, top, i / n));
+  ctx.closePath(); ctx.clip();
+  // one tile wide (no side seams), tiled vertically since the texture wraps top to bottom
+  const tw = 2 * half + 60, th = TH * tw / W;
+  for (let y = base - th; y + th > top; y -= th) ctx.drawImage(wall, W / 2 - tw / 2, y, tw, th + 1);
+  // atmospheric haze, thicker toward the base
+  let g = ctx.createLinearGradient(0, top, 0, base);
+  g.addColorStop(0, 'rgba(160,185,215,.25)'); g.addColorStop(1, 'rgba(190,210,225,.5)');
+  ctx.fillStyle = g; ctx.fillRect(0, top, W, base - top);
+  ctx.restore();
+  g = ctx.createLinearGradient(0, base - 2, 0, base + 8 * k * 3);
+  g.addColorStop(0, 'rgba(20,30,20,.35)'); g.addColorStop(1, 'rgba(20,30,20,0)');
+  ctx.fillStyle = g; ctx.fillRect(W / 2 - half - 20, base - 2, 2 * half + 40, 8 * k * 3 + 2);
+}
+
+// the plateau: a grassy field receding toward the next cliff; s = screen y of its lip
+function drawPlateau(s, actor) {
+  const d = deco, far = DMAX + .6, farY = yAt(s, far);
+  let g = ctx.createLinearGradient(0, farY - 380, 0, farY);
+  g.addColorStop(0, '#5f9ad6'); g.addColorStop(.75, '#a9cbe6'); g.addColorStop(1, '#f4dcae');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, farY);
+  // hazy lowlands far below, seen past the sides of the plateau
+  g = ctx.createLinearGradient(0, farY, 0, s);
+  g.addColorStop(0, '#b8cdc8'); g.addColorStop(1, '#6f8f80');
+  ctx.fillStyle = g; ctx.fillRect(0, farY, W, s - farY);
+  const ridge = (pts, col) => { ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(-20, farY + 1);
+    for (const [x, h] of pts) ctx.lineTo(x, farY - h); ctx.lineTo(W + 40, farY + 1); ctx.closePath(); ctx.fill(); };
   ridge(d.far, 'rgba(110,130,165,.75)');
   ridge(d.near, 'rgba(78,108,110,.9)');
-  // the flat top, receding into the distance
-  g = ctx.createLinearGradient(0, top, 0, s);
-  g.addColorStop(0, '#8fbf62'); g.addColorStop(1, '#5f9440');
-  ctx.fillStyle = g; ctx.fillRect(0, top, W, s - top);
-  for (const [x, dy] of d.trees) {
-    const y = top + dy, k = .7 + dy / 60;
-    ctx.fillStyle = '#5a3e26'; ctx.fillRect(x - 3 * k, y - 26 * k, 6 * k, 26 * k);
-    ctx.fillStyle = '#3f7a3a'; ctx.beginPath(); ctx.arc(x, y - 34 * k, 16 * k, 0, 7); ctx.arc(x - 11 * k, y - 26 * k, 11 * k, 0, 7);
-    ctx.arc(x + 11 * k, y - 26 * k, 11 * k, 0, 7); ctx.fill();
-    ctx.fillStyle = 'rgba(200,240,150,.25)'; ctx.beginPath(); ctx.arc(x - 5 * k, y - 40 * k, 7 * k, 0, 7); ctx.fill();
-  }
-  for (const [x, dy, r] of d.bushes) {
-    ctx.fillStyle = '#4c8a3c'; ctx.beginPath(); ctx.ellipse(x, top + dy, r * 1.4, r * .8, 0, Math.PI, 0); ctx.fill(); }
-  for (const [x, dy, col] of d.flowers) {
-    ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x, top + dy, 1.8, 0, 7); ctx.fill(); }
-  // overhanging grassy lip and its shadow on the cliff
+  // the field, as a trapezoid in perspective, with mown stripes for depth
+  const pt = (x, dd) => [xAt(x, dd), yAt(s, dd)];
+  const band = (d0, d1, col) => {
+    const q = [pt(W / 2 - PLAT_HW, d0), pt(W / 2 + PLAT_HW, d0), pt(W / 2 + PLAT_HW, d1), pt(W / 2 - PLAT_HW, d1)];
+    ctx.fillStyle = col; ctx.beginPath(); q.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath(); ctx.fill(); };
+  g = ctx.createLinearGradient(0, farY, 0, s);
+  g.addColorStop(0, '#a3c784'); g.addColorStop(1, '#5f9440');
+  band(0, far, g);
+  for (let k = 0; k < far / .2; k += 2) band(k * .2, (k + 1) * .2, 'rgba(255,255,200,.06)');
+  for (const [x, dd, col] of d.flowers) {
+    const k = scaleAt(dd); ctx.fillStyle = col; ctx.beginPath(); ctx.arc(xAt(x, dd), yAt(s, dd), 2 * k + .4, 0, 7); ctx.fill(); }
+  drawNextCliff(s);
+  // props and Link, painted far to near so nearer things overlap
+  const items = [
+    ...d.trees.map(([x, dd]) => [dd, () => {
+      const k = scaleAt(dd) * 1.6, tx = xAt(x, dd), y = yAt(s, dd);
+      ctx.fillStyle = 'rgba(0,0,0,.2)'; ctx.beginPath(); ctx.ellipse(tx, y, 18 * k, 5 * k, 0, 0, 7); ctx.fill();
+      ctx.fillStyle = '#5a3e26'; ctx.fillRect(tx - 3 * k, y - 26 * k, 6 * k, 26 * k);
+      ctx.fillStyle = '#3f7a3a'; ctx.beginPath(); ctx.arc(tx, y - 34 * k, 16 * k, 0, 7); ctx.arc(tx - 11 * k, y - 26 * k, 11 * k, 0, 7);
+      ctx.arc(tx + 11 * k, y - 26 * k, 11 * k, 0, 7); ctx.fill();
+      ctx.fillStyle = 'rgba(200,240,150,.25)'; ctx.beginPath(); ctx.arc(tx - 5 * k, y - 40 * k, 7 * k, 0, 7); ctx.fill(); }]),
+    ...d.bushes.map(([x, dd, r]) => [dd, () => {
+      const k = scaleAt(dd); ctx.fillStyle = '#4c8a3c'; ctx.beginPath();
+      ctx.ellipse(xAt(x, dd), yAt(s, dd), r * 1.4 * k, r * .9 * k, 0, Math.PI, 0); ctx.fill(); }]),
+  ];
+  if (actor) items.push([P.pd, actor]);
+  items.sort((a, b) => b[0] - a[0]).forEach(([, f]) => f());
+  // overhanging grassy lip and its shadow on the cliff below
   g = ctx.createLinearGradient(0, s, 0, s + 16);
   g.addColorStop(0, 'rgba(15,9,6,.6)'); g.addColorStop(1, 'rgba(15,9,6,0)');
   ctx.fillStyle = g; ctx.fillRect(0, s, W, 16);
@@ -586,7 +625,9 @@ function draw() {
   ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
 
   const surf = surfaceY();
-  if (surf > -20) drawPlateau(surf);
+  const onPlateau = (state === 'cleared' && clearT >= .7) || state === 'plateau' || state === 'enter' ||
+    (state === 'paused' && pausedFrom === 'plateau');
+  if (surf > -20) drawPlateau(surf, onPlateau ? () => drawPlateauLink(surf) : null);
 
   // falling-rock warnings
   const wy = Math.max(0, surf);
@@ -599,9 +640,7 @@ function draw() {
   }
 
   for (const p of parts) { ctx.fillStyle = `rgba(${p.col},${Math.max(0, p.life)})`; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill(); }
-  if (bok && state === 'cleared' && clearT >= BOK_AT) drawBokoblin(bok);
-  if (state === 'cleared' && clearT >= .7 && !P.knocked) drawLinkFront();
-  else if (state !== 'title') drawLink();
+  if (!onPlateau && state !== 'title') drawLink();
   for (const r of rocks) drawRock(r);
   if (state === 'play') staminaWheel();
 
@@ -617,6 +656,9 @@ function draw() {
   g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,.5)');
   ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
   if (P.flash > 0) { ctx.fillStyle = `rgba(255,40,40,${P.flash * 2})`; ctx.fillRect(0, 0, W, H); }
+  // fade to black between levels
+  const fade = state === 'enter' ? fadeT / .7 : fadeIn / .6;
+  if (fade > 0) { ctx.fillStyle = `rgba(0,0,0,${Math.min(1, fade)})`; ctx.fillRect(0, 0, W, H); }
   ctx.restore();
 
   // HUD
@@ -634,15 +676,16 @@ function draw() {
     text(level === 1 ? 'Reach the plateau at 100 m' : 'More rocks incoming!', W / 2, H * .5 + 44, 18);
     ctx.globalAlpha = 1;
   }
-  if (state === 'cleared') {
-    const a = Math.min(1, clearT / .5);
-    ctx.globalAlpha = a;
-    ctx.fillStyle = 'rgba(8,14,20,.6)'; ctx.fillRect(0, H * .52, W, 128);
-    text(`Level ${level} Complete!`, W / 2, H * .52 + 36, 38, '#f5dc8a');
-    text(P.knocked ? 'A Bokoblin knocked you off the mountain!' : healed ? 'You reached the plateau. +1 heart' : 'You reached the plateau.',
-      W / 2, H * .52 + 72, 16, P.knocked ? '#ffb3a0' : '#f3ead2');
-    if (P.knocked && P.y > H + 40 && Math.sin(time * 4) > -.3) text(`Press SPACE or tap to climb Level ${level + 1}`, W / 2, H * .52 + 102, 17, '#7ee25a');
-    ctx.globalAlpha = 1;
+  if (state === 'cleared' || state === 'plateau' || (state === 'paused' && pausedFrom === 'plateau')) {
+    const a = Math.max(0, Math.min(1, clearT / .4, (4.6 - clearT) / .6));
+    if (a > 0) {
+      ctx.globalAlpha = a;
+      ctx.fillStyle = 'rgba(8,14,20,.6)'; ctx.fillRect(0, H * .14, W, 116);
+      text(`Level ${level} Complete!`, W / 2, H * .14 + 34, 38, '#f5dc8a');
+      text(healed ? 'You reached the plateau. +1 heart' : 'You reached the plateau.', W / 2, H * .14 + 68, 16);
+      text(`Walk to the cliff ahead to start Level ${level + 1}`, W / 2, H * .14 + 94, 16, '#7ee25a');
+      ctx.globalAlpha = 1;
+    }
   }
 
   if (state === 'title') overlay(() => {
@@ -669,7 +712,8 @@ function overlay(fn) { ctx.fillStyle = 'rgba(8,14,20,.62)'; ctx.fillRect(0, 0, W
 let last = performance.now();
 function frame(now) {
   const dt = Math.min(.05, (now - last) / 1000); last = now;
-  if (state === 'play' || state === 'falling' || state === 'cleared') update(dt);
+  pollGamepad();
+  if (!['title', 'over', 'paused'].includes(state)) update(dt);
   else { time += dt; for (const c of clouds) { c.x += c.v * dt; if (c.x - c.s * 2 > W) c.x = -c.s * 2; } }
   draw();
   requestAnimationFrame(frame);
